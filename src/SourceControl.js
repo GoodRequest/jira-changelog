@@ -52,7 +52,7 @@ export default class SourceControl {
 					revision: '%H',
 					date: '%ai',
 					summary: '%s%d',
-					fullText: '%s\n%d\n%b',
+					fullText: '%s\n%b',
 					authorName: '%aN',
 					authorEmail: '%ae',
 					parents: '%P'
