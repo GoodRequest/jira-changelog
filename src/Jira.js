@@ -121,10 +121,22 @@ export default class Jira {
 		// Add jira tickets to log
 		const tickets = await Promise.all(promises)
 
-		log.tickets = tickets
-			.flatMap((ticket) => (ticket?.fields?.issuetype?.subtask ? [ticket, ticket.fields.parent] : ticket))
-			.filter((t) => t && this.includeTicket(t))
+		// For each subtask ticket, fetch the parent ticket if it already hasn't been
+		const parentPromises = []
+		tickets.forEach((ticket) => {
+			if (ticket?.fields?.issuetype?.subtask) {
+				const parentKey = ticket?.fields?.parent?.key
+				if (found[parentKey]) {
+					return
+				}
+				found[parentKey] = true
+				parentPromises.push(this.fetchJiraTicket(parentKey))
+			}
+		})
+		const parentTickets = await Promise.all(parentPromises)
 
+		// Add found jira tickets and their parent tickets to log
+		log.tickets = tickets.concat(parentTickets).filter((t) => t && this.includeTicket(t))
 		return log
 	}
 
