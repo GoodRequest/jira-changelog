@@ -11,6 +11,7 @@
 		"dist"
 	],
 	"scripts": {
+		"release": "npm version $npm_config_type --tag-version-prefix=\"v\" --message=\"v%s\"",
 		"build": "babel src --out-dir dist/scripts -s; cp changelog.config.js ./dist/",
 		"clean": "rm -r dist || true",
 		"test": "npm run build && jest dist",
