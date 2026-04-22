@@ -2,7 +2,7 @@
 	"name": "@goodrequest/jira-changelog",
 	"version": "2.2.9",
 	"description": "Generates a changelog by matching git commits to Jira tickets.",
-	"repository": "https://github.com/jgillick/jira-changelog",
+	"repository": "https://github.com/GoodRequest/jira-changelog",
 	"main": "dist/scripts/index.js",
 	"bin": {
 		"jira-changelog": "dist/scripts/cli.js"
