@@ -2,5 +2,7 @@
 module.exports = {
 	SourceControl: require('./SourceControl').default,
 	Jira: require('./Jira').default,
-	Config: require('./Config')
+	Slack: require('./Slack').default,
+	Config: require('./Config'),
+	template: require('./template')
 }

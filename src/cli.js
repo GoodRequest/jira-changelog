@@ -1,50 +1,49 @@
 #!/usr/bin/env node
 
 /**
- * The jira-changelog CLI
+ * jira-changelog CLI
  */
-
 import 'core-js/stable'
 import 'regenerator-runtime/runtime'
 import 'source-map-support/register'
-import program from 'commander'
-import path from 'path'
-import Slack from './Slack'
-import { decodeEntity } from 'html-entities'
-import fs from 'fs'
 
+import fs from 'fs'
+import path from 'path'
+import { program } from 'commander'
+import git from 'simple-git'
+import { decodeEntity } from 'html-entities'
+
+import Slack from './Slack'
 import { generateTemplateData, renderTemplate } from './template'
 import { readConfigFile } from './Config'
 import SourceControl from './SourceControl'
 import Jira from './Jira'
-import git from 'simple-git'
 
 /**
- * Parse command line arguments
+ * Parse command line arguments.
  */
-function commandLineArgs() {
+function commandLineArgs(argv = process.argv) {
 	const pkg = require('../../package.json')
+
 	program
 		.version(pkg.version)
-		.option('-c, --config <filepath>', 'Path to the config file.')
-		.option('-r, --range <from>...<to>', 'git commit range for changelog', parseRange)
-		.option('-d, --date <date>[...date]', 'Only include commits after this date', parseRange)
-		.option('-s, --slack', 'Automatically post changelog to slack (if configured)')
+		.option('-c, --config <path>', 'Path to the config file.')
+		.option('-r, --range <range>', 'git commit range for changelog', parseRange)
+		.option('-d, --date <range>', 'Only include commits after this date, or within a date range', parseRange)
+		.option('-s, --slack', 'Automatically post changelog to Slack, if configured')
 		.option('--release [release]', 'Assign a release version to these stories')
-		.parse(process.argv)
+		.parse(argv)
 }
 
 /**
- * Run the main program
+ * Run the main program.
  */
-async function runProgram() {
+export async function runProgram(argv = process.argv, cwd = process.cwd()) {
 	try {
-		commandLineArgs()
-
+		commandLineArgs(argv)
 		const options = program.opts()
 
-		// Determine the git workspace path
-		let gitPath = process.cwd()
+		let gitPath = cwd
 		if (program.args.length) {
 			gitPath = program.args[0]
 		}
@@ -52,46 +51,44 @@ async function runProgram() {
 
 		const config = readConfigFile(gitPath)
 		config.gitPath = gitPath
-		const jira = new Jira(config)
-		const source = new SourceControl()
 
+		const jira = new Jira(config)
+		const source = new SourceControl(config)
 		const range = await getRangeObject(config, options)
 
-		// Release flag used, but no name passed
 		if (options.release === true) {
 			if (typeof config.jira.generateReleaseVersionName !== 'function') {
 				console.log(
 					"You need to define the jira.generateReleaseVersionName function in your config, if you're not going to pass the release version name in the command."
 				)
-				return
+				return undefined
 			}
+
 			options.release = await config.jira.generateReleaseVersionName(range)
 		}
 
-		// Get logs
 		const commitLogs = await source.getCommitLogs(gitPath, range)
 		const changelog = await jira.generate(commitLogs, options.release)
-
-		// Render template
 		const tmplData = await generateTemplateData(config, changelog, jira.releaseVersions)
 		const changelogMessage = renderTemplate(config, tmplData)
+		const decodedMessage = decodeEntity(changelogMessage)
 
-		// Output to console
-		console.log(decodeEntity(changelogMessage))
+		console.log(decodedMessage)
 
-		// Save to file
 		if (config.save) {
-			const filepath = path.join(process.cwd(), 'changelog')
+			const filepath = path.join(cwd, 'changelog')
 			if (!fs.existsSync(filepath)) {
-				await fs.mkdirSync('changelog')
+				fs.mkdirSync(filepath)
 			}
-			await fs.writeFileSync(path.join(filepath, `changelog-${options.release || Date.now()}.md`), decodeEntity(changelogMessage))
+
+			fs.writeFileSync(path.join(filepath, `changelog-${options.release || Date.now()}.md`), decodedMessage)
 		}
 
-		// Post to slack
 		if (options.slack) {
 			await postToSlack(config, tmplData, changelogMessage)
 		}
+
+		return decodedMessage
 	} catch (e) {
 		console.error(e.stack || e)
 		process.exit(1)
@@ -99,45 +96,45 @@ async function runProgram() {
 }
 
 /**
- * Post the changelog to slack
- *
- * @param {Object} config - The configuration object
- * @param {Object} data - The changelog data object.
- * @param {String} changelogMessage - The changelog message
+ * Post the changelog to Slack.
+ * @param {Object} config - Configuration object.
+ * @param {Object} data - Changelog data object.
+ * @param {String} changelogMessage - Rendered changelog message.
  */
-async function postToSlack(config, data, changelogMessage) {
+export async function postToSlack(config, data, changelogMessage) {
 	const slack = new Slack(config)
 
 	if (!slack.isEnabled() || !config.slack.channel) {
 		throw new Error('Error: Slack is not configured.')
-		return
 	}
 
 	console.log(`\nPosting changelog message to slack channel: ${config.slack.channel}...`)
+
 	try {
-		// Transform for slack
 		if (typeof config.transformForSlack == 'function') {
 			changelogMessage = await Promise.resolve(config.transformForSlack(changelogMessage, data))
 		}
 
-		// Post to slack
 		await slack.postMessage(changelogMessage, config.slack.channel)
 		console.log('Sent')
 	} catch (err) {
-		throw new Error(err)
+		throw err instanceof Error ? err : new Error(err)
 	}
 }
 
 /**
- * Convert a range string formatted as "a...b" into an array.
- *
+ * Convert a range string formatted as "a...b" or "a..b" into an object.
  * @param {String} rangeStr - The range string.
- * @return {Array}
+ * @return {Object}
  */
 export function parseRange(rangeStr) {
 	let parts = []
 	let symmetric = false
 	let rangeError = false
+
+	if (!rangeStr || typeof rangeStr !== 'string') {
+		throw new Error('Invalid Range')
+	}
 
 	if (rangeStr.includes('...')) {
 		if (rangeStr.length <= 3) {
@@ -151,68 +148,66 @@ export function parseRange(rangeStr) {
 		}
 		parts = rangeStr.split('..')
 	} else if (rangeStr.length > 0) {
-		parts[0] = rangeStr
+		return rangeStr
 	}
 
-	if (!parts.length || rangeError) {
+	if (!parts.length || rangeError || !parts[0]) {
 		throw new Error('Invalid Range')
 	}
 
-	return {
-		symmetric,
-		from: parts[0],
-		to: parts[1] || ''
-	}
+	return { symmetric, from: parts[0], to: parts[1] || '' }
 }
 
 /**
- * Construct the range object from the CLI arguments and config
- *
- * @param {Object} config - The config object provided by Config.getConfigForPath
- * @param {Object} options - Command line arguments parsed in options object
- * @return {Object}
+ * Construct the range object from CLI arguments and config.
+ * @param {Object} config - Config object.
+ * @param {Object} options - Parsed command line options.
+ * @return {Promise<Object>}
  */
-async function getRangeObject(config, options) {
+export async function getRangeObject(config, options) {
 	const range = {}
 	const defaultRange = config.sourceControl && config.sourceControl.defaultRange ? config.sourceControl.defaultRange : {}
+	const dateRange = options.dateRange || options.date
+
+	if (typeof options.range === 'string') {
+		return options.range
+	}
 
 	if (options.range && options.range.from) {
 		Object.assign(range, options.range)
 	}
-	if (options.dateRange && options.dateRange.from) {
-		range.after = options.dateRange.from
-		if (options.dateRange.to) {
-			range.before = options.dateRange.to
+
+	if (typeof dateRange === 'string') {
+		range.after = dateRange
+	} else if (dateRange && dateRange.from) {
+		range.after = dateRange.from
+		if (dateRange.to) {
+			range.before = dateRange.to
 		}
 	}
 
-	// Use default range
 	if (!Object.keys(range).length && Object.keys(defaultRange).length) {
 		Object.assign(range, defaultRange)
 	}
 
 	if (Object.keys(range).length < 2) {
 		const workspace = git(config.gitPath)
-
 		const { all: allTags } = await workspace.tags()
 
 		if (Object.keys(range).length === 1) {
 			const rangeFromTagIndex = range.from ? allTags.findIndex((item) => item === range.from) : null
 			const rangeToTagIndex = range.to ? allTags.findIndex((item) => item === range.to) : null
 
-			// Check if the next tag exists
 			if (range.from && rangeFromTagIndex + 1 < allTags.length) {
 				range.to = allTags[rangeFromTagIndex + 1]
 			}
-			// Check if the previous tag exists
+
 			if (range.to && rangeToTagIndex - 1 >= 0) {
 				range.from = allTags[rangeToTagIndex - 1]
 			}
-		} else {
-			if (allTags.length >= 2) {
-				range.from = allTags[allTags.length - 2]
-				range.to = allTags[allTags.length - 1]
-			}
+		} else if (allTags.length >= 2) {
+			range.from = allTags[allTags.length - 2]
+			range.to = allTags[allTags.length - 1]
 		}
 	}
 
@@ -220,12 +215,10 @@ async function getRangeObject(config, options) {
 		throw new Error('No range defined for the changelog.')
 	}
 
-	// Ensure symmetric is explicitly set
 	range.symmetric = !!range.symmetric
 	return range
 }
 
-// Run program
 if (require.main === module) {
 	runProgram()
 }

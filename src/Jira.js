@@ -1,163 +1,405 @@
 import 'core-js/stable'
 import 'regenerator-runtime/runtime'
-import JiraApi from 'jira-client'
+
+import fetch from 'node-fetch'
 import PromiseThrottle from 'promise-throttle'
+
+const ATLASSIAN_API_HOST = 'api.atlassian.com'
+const LEGACY_JIRA_API_VERSION = 2
+const GATEWAY_JIRA_API_VERSION = 3
 
 const promiseThrottle = new PromiseThrottle({
 	requestsPerSecond: 10,
 	promiseImplementation: Promise
 })
 
+export function normalizeHost(host) {
+	if (!host || typeof host !== 'string') {
+		return host
+	}
+
+	return host
+		.trim()
+		.replace(/^https?:\/\//i, '')
+		.replace(/\/+$/, '')
+}
+
+export function normalizeBaseUrl(host) {
+	if (!host || typeof host !== 'string') {
+		return host
+	}
+
+	const normalized = host.trim().replace(/\/+$/, '')
+	return /^https?:\/\//i.test(normalized) ? normalized : `https://${normalized}`
+}
+
+function normalizePath(path) {
+	if (!path || typeof path !== 'string') {
+		return ''
+	}
+
+	const trimmed = path.trim().replace(/\/+$/, '')
+	return trimmed ? (trimmed.startsWith('/') ? trimmed : `/${trimmed}`) : ''
+}
+
+function normalizeEndpoint(endpoint) {
+	return endpoint.startsWith('/') ? endpoint : `/${endpoint}`
+}
+
+function encodeBasicAuth(email, token) {
+	return `Basic ${Buffer.from(`${email}:${token}`).toString('base64')}`
+}
+
+function parseResponseBody(text) {
+	if (!text) {
+		return undefined
+	}
+
+	try {
+		return JSON.parse(text)
+	} catch (e) {
+		return text
+	}
+}
+
+function stringifyErrorDetail(detail) {
+	if (!detail) {
+		return ''
+	}
+
+	if (Array.isArray(detail)) {
+		return detail.join('; ')
+	}
+
+	if (typeof detail === 'string') {
+		return detail
+	}
+
+	if (detail.message) {
+		return detail.message
+	}
+
+	try {
+		return JSON.stringify(detail)
+	} catch (e) {
+		return String(detail)
+	}
+}
+
+function errorStatus(err) {
+	return err?.status || err?.statusCode || err?.response?.status || err?.response?.statusCode
+}
+
+function normalizeApiVersion(value, fallback) {
+	const parsed = Number(value || fallback)
+
+	return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback
+}
+
+export class JiraRequestError extends Error {
+	constructor(message, response, body) {
+		super(message)
+		this.name = 'JiraRequestError'
+		this.status = response?.status
+		this.statusCode = response?.status
+		this.statusText = response?.statusText
+		this.body = body
+	}
+}
+
 /**
- * Generate changelog by matching source control commit logs to jiar tickets.
+ * Minimal Jira REST client for the exact endpoints used by the changelog tool.
+ */
+export class JiraRestClient {
+	constructor({ host, basePath = '', email, token, apiVersion, options = {} }) {
+		if (!host) {
+			throw new Error('ERROR: Cannot configure Jira without a host.')
+		}
+
+		this.host = normalizeHost(host)
+		this.basePath = normalizePath(basePath)
+		this.email = email
+		this.token = token
+		this.apiVersion = apiVersion
+		this.fetchOptions = options.fetchOptions || {}
+		this.headers = options.headers || {}
+		this.baseUrl = `https://${this.host}${this.basePath}/rest/api/${this.apiVersion}`
+	}
+
+	async request(method, endpoint, body) {
+		const headers = {
+			Accept: 'application/json',
+			...this.headers
+		}
+
+		if (this.email && this.token) {
+			headers.Authorization = encodeBasicAuth(this.email, this.token)
+		}
+
+		const options = {
+			...this.fetchOptions,
+			method,
+			headers
+		}
+
+		if (typeof body !== 'undefined') {
+			headers['Content-Type'] = 'application/json'
+			options.body = JSON.stringify(body)
+		}
+
+		const response = await fetch(`${this.baseUrl}${normalizeEndpoint(endpoint)}`, options)
+		const text = typeof response.text === 'function' ? await response.text() : ''
+		const parsedBody = parseResponseBody(text)
+
+		if (!response.ok) {
+			const detail =
+				typeof parsedBody === 'object' && parsedBody
+					? parsedBody.errorMessages || parsedBody.errors || parsedBody.message
+					: parsedBody
+			const suffix = detail ? `: ${stringifyErrorDetail(detail)}` : ''
+
+			throw new JiraRequestError(`Jira API request failed: ${response.status} ${response.statusText || ''}${suffix}`, response, parsedBody)
+		}
+
+		return parsedBody
+	}
+
+	findIssue(issueKeyOrId) {
+		return this.request('GET', `/issue/${encodeURIComponent(issueKeyOrId)}`)
+	}
+
+	getVersions(projectKey) {
+		return this.request('GET', `/project/${encodeURIComponent(projectKey)}/versions`)
+	}
+
+	createVersion(data) {
+		return this.request('POST', '/version', data)
+	}
+
+	updateIssue(issueKeyOrId, data) {
+		return this.request('PUT', `/issue/${encodeURIComponent(issueKeyOrId)}`, data)
+	}
+}
+
+/**
+ * Generate a changelog by matching source control commit logs to Jira tickets.
  */
 export default class Jira {
 	constructor(config) {
 		this.config = config
 		this.jira = undefined
+		this.jiraClientPromise = undefined
 		this.releaseVersions = []
 		this.ticketPromises = {}
+		this.apiConfig = this.normalizeApiConfig(config?.jira?.api || {})
 
-		const { host, username, password } = config.jira.api
-		let { email, token, options } = config.jira.api
+		if (!this.apiConfig.host && !this.apiConfig.cloudId && !this.apiConfig.gatewayBase) {
+			console.error('ERROR: Cannot configure Jira without jira.api.host, jira.api.cloudId, or jira.api.gatewayBase.')
+			return
+		}
+
+		if (!this.apiConfig.useApiGateway || this.apiConfig.cloudId || this.apiConfig.gatewayBase) {
+			this.jira = this.createJiraClient(this.apiConfig)
+		}
+	}
+
+	normalizeApiConfig(api = {}) {
+		const env = process.env || {}
+		const host = api.host || env.JIRA_API_HOST || env.CHANGELOG_JIRA_API_HOST
+		const { username, password } = api
+		let { email, token, options, cloudId, apiVersion, useApiGateway, resolveCloudId } = api
+
+		if (!email) {
+			email = api.user || env.JIRA_API_USER || env.CHANGELOG_JIRA_API_USER || env.JIRA_EMAIL || env.CHANGELOG_JIRA_EMAIL
+		}
+
+		if (!token) {
+			token = env.JIRA_API_TOKEN || env.CHANGELOG_JIRA_API_TOKEN
+		}
 
 		if (!token && typeof password !== 'undefined') {
 			console.warn('WARNING: Jira password is deprecated. Use an API token instead.')
 			token = password
 		}
+
 		if (!email && typeof username !== 'undefined') {
 			console.warn('WARNING: Jira username is deprecated for API authentication. Use user email instead.')
 			email = username
 		}
-		if (!options) {
-			options = {}
-		}
 
-		if (config.jira.api.host) {
-			this.jira = new JiraApi({
-				host,
-				username: email,
-				password: token,
-				protocol: 'https',
-				strictSSL: true,
-				...options, // let user decide if they need to overwrite any of the hardcoded values (e.g. strictSSL or protocol)
-				apiVersion: 2 // forcing api version 2 to avoid breaking code by using different api version
-			})
-		} else {
-			console.error('ERROR: Cannot configure Jira without a host configuration.')
+		options = options || {}
+		cloudId = cloudId || env.JIRA_API_CLOUD_ID || env.CHANGELOG_JIRA_API_CLOUD_ID
+		cloudId = cloudId ? String(cloudId).trim() : undefined
+
+		// New scoped Atlassian API tokens require the API gateway path.
+		// Keep legacy site-host mode available, but only as an explicit opt-out.
+		useApiGateway = useApiGateway !== false
+
+		return {
+			host: normalizeHost(host),
+			email,
+			token,
+			options,
+			cloudId,
+			useApiGateway,
+			resolveCloudId: resolveCloudId !== false,
+			gatewayHost: normalizeHost(api.gatewayHost || ATLASSIAN_API_HOST),
+			gatewayBase: normalizePath(api.gatewayBase),
+			basePath: normalizePath(api.basePath || options.base),
+			apiVersion: normalizeApiVersion(apiVersion, useApiGateway ? GATEWAY_JIRA_API_VERSION : LEGACY_JIRA_API_VERSION)
 		}
 	}
 
-	/**
-	 * Generate changelog by matching source control commit logs to jira tickets
-	 * and, optionally, creating the release version.
-	 *
-	 * @param {Array} commitLogs - A list of source control commit logs.
-	 * @param {String} releaseVersion - The name of the release version to create.
-	 * @return {Object}
-	 */
-	async generate(commitLogs, releaseVersion = null) {
-		const logs = []
-		this.releaseVersions = []
-		try {
-			const promises = commitLogs.map((commit) =>
-				this.findJiraInCommit(commit, releaseVersion)
-					.then((log) => {
-						logs.push(log)
-					})
-					.catch((e) => {
-						console.error(e)
-					})
-			)
-			promises.push(Promise.resolve()) // ensure at least one
-			await Promise.all(promises)
+	createJiraClient(apiConfig) {
+		const { useApiGateway, cloudId, gatewayHost, gatewayBase, host, email, token, apiVersion, options, basePath } = apiConfig
 
-			// Get all Jira tickets (filter out duplicates by keying on ID)
-			let ticketsHash = {}
-			let ticketsList = []
-			logs.forEach((log) => {
-				log.tickets.forEach((ticket) => (ticketsHash[ticket.id] = ticket))
-			})
-			ticketsList = Object.keys(ticketsHash).map((k) => ticketsHash[k])
+		if (useApiGateway && !cloudId && !gatewayBase) {
+			throw new Error('ERROR: Jira API gateway mode requires a cloudId. Set jira.api.cloudId, set JIRA_API_CLOUD_ID, or ensure jira.api.host points to your Atlassian site host so cloudId can be resolved.')
+		}
 
-			// If there are Jira tickets, create a release for them
-			if (ticketsList.length && releaseVersion) {
-				return this.addTicketsToReleaseVersion(ticketsList, releaseVersion).then(() => logs)
+		return new JiraRestClient({
+			host: useApiGateway ? gatewayHost : host,
+			basePath: useApiGateway ? gatewayBase || `/ex/jira/${encodeURIComponent(cloudId)}` : basePath,
+			email,
+			token,
+			apiVersion,
+			options
+		})
+	}
+
+	async getJiraClient() {
+		if (this.jira) {
+			return this.jira
+		}
+
+		if (!this.jiraClientPromise) {
+			this.jiraClientPromise = this.createJiraClientAsync()
+		}
+
+		return this.jiraClientPromise
+	}
+
+	async createJiraClientAsync() {
+		if (!this.apiConfig.useApiGateway) {
+			this.jira = this.createJiraClient(this.apiConfig)
+			return this.jira
+		}
+
+		if (!this.apiConfig.cloudId && !this.apiConfig.gatewayBase) {
+			if (!this.apiConfig.resolveCloudId) {
+				throw new Error('ERROR: Jira API gateway mode requires a cloudId when jira.api.resolveCloudId is false.')
 			}
 
-			return logs
-		} catch (e) {
-			throw new Error(e)
+			this.apiConfig.cloudId = await this.resolveJiraCloudId(this.apiConfig.host)
 		}
+
+		this.jira = this.createJiraClient(this.apiConfig)
+		return this.jira
 	}
 
-	/**
-	 * Find JIRA ticket numbers in a commit log, and automatically load the
-	 * ticket info for it.
-	 *
-	 * @param {Object} commitLog - Commit log object
-	 * @param {String} releaseVersion - Release version eg, mobileweb-1.8.0
-	 * @return {Promsie} Resolves to an object with a jira array property
-	 */
+	async resolveJiraCloudId(host) {
+		if (!host) {
+			throw new Error('ERROR: Cannot resolve Jira cloudId without jira.api.host.')
+		}
+
+		const response = await fetch(`${normalizeBaseUrl(host)}/_edge/tenant_info`, {
+			headers: { Accept: 'application/json' }
+		})
+
+		if (!response.ok) {
+			const responseText = typeof response.text === 'function' ? await response.text() : ''
+			throw new Error(`ERROR: Could not resolve Jira cloudId: ${response.status} ${response.statusText || ''}${responseText ? `\n${responseText}` : ''}`)
+		}
+
+		const tenantInfo = await response.json()
+
+		if (!tenantInfo || !tenantInfo.cloudId) {
+			throw new Error('ERROR: Jira tenant_info response did not include cloudId.')
+		}
+
+		return tenantInfo.cloudId
+	}
+
+	async generate(commitLogs, releaseVersion = null) {
+		this.releaseVersions = []
+		const logs = await Promise.all(commitLogs.map((commit) => this.findJiraInCommit(commit)))
+
+		const ticketsHash = {}
+		logs.forEach((log) => {
+			log.tickets.forEach((ticket) => {
+				const key = ticket.id || ticket.key
+				if (key) {
+					ticketsHash[key] = ticket
+				}
+			})
+		})
+
+		const ticketsList = Object.keys(ticketsHash).map((key) => ticketsHash[key])
+
+		if (ticketsList.length && releaseVersion) {
+			await this.addTicketsToReleaseVersion(ticketsList, releaseVersion)
+		}
+
+		return logs
+	}
+
 	async findJiraInCommit(commitLog) {
 		const log = Object.assign({ tickets: [] }, { ...commitLog })
 		const promises = []
 		const found = {}
 
-		// Search for jira ticket numbers in the commit text
-		const ticketKeys = this.parseTicketsFromString(log.fullText)
-		ticketKeys.forEach((key) => {
-			// Skip loading if we're loading this one
+		this.parseTicketsFromString(log.fullText || '').forEach((key) => {
 			if (found[key]) {
 				return
 			}
-			found[key] = true
 
-			promises.push(
-				this.fetchJiraTicket(key).catch(() => {}) // ignore errors
-			)
+			found[key] = true
+			promises.push(this.fetchJiraTicket(key).catch((err) => this.ignoreMissingIssue(err)))
 		})
 
-		// Add jira tickets to log
 		const tickets = await Promise.all(promises)
-
-		// For each subtask ticket, fetch the parent ticket if it already hasn't been
 		const parentPromises = []
+
 		tickets.forEach((ticket) => {
 			if (ticket?.fields?.issuetype?.subtask) {
 				const parentKey = ticket?.fields?.parent?.key
-				if (found[parentKey]) {
+
+				if (!parentKey || found[parentKey]) {
 					return
 				}
+
 				found[parentKey] = true
-				parentPromises.push(this.fetchJiraTicket(parentKey))
+				parentPromises.push(this.fetchJiraTicket(parentKey).catch((err) => this.ignoreMissingIssue(err)))
 			}
 		})
-		const parentTickets = await Promise.all(parentPromises)
 
-		// Add found jira tickets and their parent tickets to log
-		log.tickets = tickets.concat(parentTickets).filter((t) => t && this.includeTicket(t))
+		const parentTickets = await Promise.all(parentPromises)
+		log.tickets = tickets.concat(parentTickets).filter((ticket) => ticket && this.includeTicket(ticket))
+
 		return log
 	}
 
-	/**
-	 * Load a Jira issue ticket from the API.
-	 *
-	 * @param {String} ticketKey - The Jira ticket ID key
-	 *
-	 * @return {Promise}
-	 */
+	ignoreMissingIssue(err) {
+		if (this.isNotFoundError(err)) {
+			return undefined
+		}
+
+		throw err
+	}
+
 	fetchJiraTicket(ticketKey) {
 		if (!ticketKey) {
 			return Promise.resolve()
 		}
 
-		// Get Jira issue ticket object
 		let promise = this.ticketPromises[ticketKey]
+
 		if (!promise) {
 			promise = promiseThrottle.add(this.getJiraIssue.bind(this, ticketKey))
-			promise.catch(() => {
-				console.log(`Ticket ${ticketKey} not found`)
+			promise.catch((err) => {
+				if (this.isNotFoundError(err)) {
+					console.log(`Ticket ${ticketKey} not found`)
+				}
 			})
 			this.ticketPromises[ticketKey] = promise
 		}
@@ -165,136 +407,129 @@ export default class Jira {
 		return promise
 	}
 
-	/**
-	 * Creates a release version and assigns tickets to it.
-	 *
-	 * @param {Array} ticket - List of Jira ticket objects
-	 * @param {String} versionName - The name of the release version to add the ticket to.
-	 * @return {Promise}
-	 */
 	async addTicketsToReleaseVersion(tickets, versionName) {
 		const versionPromises = {}
 		this.releaseVersions = []
+		const jira = await this.getJiraClient()
 
-		// Create version and add it to a ticket
 		async function updateTicketVersion(ticket) {
-			const project = ticket.fields.project.key
+			const project = ticket?.fields?.project?.key
 
-			// Create version on project
+			if (!project) {
+				throw new Error(`Ticket ${ticket.key || ticket.id} does not include fields.project.key.`)
+			}
+
 			let verPromise = versionPromises[project]
+
 			if (!verPromise) {
 				verPromise = this.createProjectVersion(versionName, project)
 				versionPromises[project] = verPromise
 
-				// Add to list of releases
 				verPromise.then((ver) => {
 					ver.projectKey = project
 					this.releaseVersions.push(ver)
 				})
 			}
 
-			// Add version to ticket
 			const versionObj = await verPromise
-			const { fixVersions } = ticket.fields
-			fixVersions.push({ name: versionObj.name })
+			const fixVersions = Array.isArray(ticket.fields.fixVersions) ? [...ticket.fields.fixVersions] : []
+			const alreadyAssigned = fixVersions.some((version) => version.id === versionObj.id || version.name === versionObj.name)
 
-			const result = await this.jira.updateIssue(ticket.id, {
+			if (!alreadyAssigned) {
+				fixVersions.push({ name: versionObj.name })
+			}
+
+			return jira.updateIssue(ticket.id || ticket.key, {
 				fields: { fixVersions }
 			})
-			return result
 		}
 
-		// Loop through tickets and throttle the promises.
 		const promises = tickets.map((ticket) => {
 			return promiseThrottle.add(updateTicketVersion.bind(this, ticket)).catch((err) => {
-				if (err instanceof Error) {
-					console.log(err)
-				} else {
-					console.log(JSON.stringify(err, null, '  '))
+				if (this.isAuthOrPermissionError(err)) {
+					throw err
 				}
+
+				console.log(err instanceof Error ? err : JSON.stringify(err, null, ' '))
 				console.log(`Could not assign ticket ${ticket.key} to release '${versionName}'!`)
 			})
 		})
+
 		return Promise.all(promises)
 	}
 
-	/**
-	 * Add a version to a single project, if it doesn't current exist
-	 * @param {String} versionName - The version name
-	 * @param {Array} projectKey - The project key
-	 * @return {Promise<String>} Resolves to version name string, as it exists in JIRA
-	 */
 	async createProjectVersion(versionName, projectKey) {
-		let searchName = versionName.toLowerCase()
-		const versions = await this.jira.getVersions(projectKey)
+		const searchName = versionName.toLowerCase()
+		const jira = await this.getJiraClient()
+		const versions = await jira.getVersions(projectKey)
+		const exists = versions.find((version) => version.name.toLowerCase() === searchName)
 
-		const exists = versions.find((v) => v.name.toLowerCase() == searchName)
 		if (exists) {
 			return exists
 		}
 
-		const result = await this.jira.createVersion({
+		return jira.createVersion({
 			name: versionName,
 			project: projectKey
 		})
-		return result
 	}
 
-	/**
-	 * Retrieve the jira issue by ID.
-	 * If the issue is sub-task or sub-bug, return parent task.
-	 *
-	 * @param {String} ticketId - The ticket ID of the issue to retrieve.
-	 * @return {Promise} Resolves a jira issue object
-	 */
 	async getJiraIssue(ticketId) {
-		if (!this.jira) {
+		const jira = await this.getJiraClient()
+
+		if (!jira) {
 			return Promise.reject('Jira is not configured.')
 		}
 
-		return this.jira.findIssue(ticketId)
+		try {
+			return await jira.findIssue(ticketId)
+		} catch (err) {
+			if (this.isAuthOrPermissionError(err)) {
+				throw new Error(`Jira authentication or permission check failed while loading ${ticketId}: ${errorStatus(err)} ${err.message || err}`)
+			}
+
+			throw err
+		}
 	}
 
-	/**
-	 * Should ticket be included in changelog
-	 * @param   {Object} ticket - Jira ticket object
-	 * @returns {Boolean}
-	 */
+	isNotFoundError(err) {
+		return errorStatus(err) === 404
+	}
+
+	isAuthOrPermissionError(err) {
+		return [401, 403].includes(errorStatus(err))
+	}
+
 	includeTicket(ticket) {
-		if (!ticket.fields) {
+		if (!ticket?.fields?.issuetype?.name) {
 			return false
 		}
 
 		const type = ticket.fields.issuetype.name
 		const { includeIssueTypes, excludeIssueTypes } = this.config.jira
+
 		if (Array.isArray(includeIssueTypes) && includeIssueTypes.length) {
 			return includeIssueTypes.includes(type)
-		} else if (Array.isArray(excludeIssueTypes)) {
+		}
+
+		if (Array.isArray(excludeIssueTypes)) {
 			return !excludeIssueTypes.includes(type)
 		}
+
 		return true
 	}
 
-	/**
-	 * Parse the JIRA ticket keys embedded in a string.
-	 * @param   {Object} str - The string to parse them out of.
-	 * @returns {Array} List of tickets
-	 */
-	parseTicketsFromString(str) {
+	parseTicketsFromString(str = '') {
 		const configPattern = this.config.jira.ticketIDPattern
 		const searchPattern = new RegExp(configPattern.source, `${configPattern.flags || ''}g`)
-		const matches = str.match(searchPattern) || []
+		const matches = String(str).match(searchPattern) || []
 
-		// Extract ticket from pattern
 		return matches
 			.map((match) => {
 				let key = match.match(configPattern)
 				key = key.length > 1 ? key[1] : key[0]
-				if (!key) {
-					return null
-				}
-				return key.toUpperCase()
+				return key ? key.toUpperCase() : null
 			})
-			.filter((m) => !!m)
+			.filter(Boolean)
 	}
 }
