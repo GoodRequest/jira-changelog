@@ -433,14 +433,16 @@ export default class Jira {
 			if (!verPromise) {
 				verPromise = this.createProjectVersion(versionName, project)
 				versionPromises[project] = verPromise
-
-				verPromise.then((ver) => {
-					ver.projectKey = project
-					this.releaseVersions.push(ver)
-				})
 			}
 
 			const versionObj = await verPromise
+			const trackedRelease = this.releaseVersions.some((version) => {
+				return version.projectKey === project && (version.id === versionObj.id || version.name === versionObj.name)
+			})
+
+			if (!trackedRelease) {
+				this.releaseVersions.push({ ...versionObj, projectKey: project })
+			}
 			const fixVersions = Array.isArray(ticket.fields.fixVersions) ? [...ticket.fields.fixVersions] : []
 			const alreadyAssigned = fixVersions.some((version) => version.id === versionObj.id || version.name === versionObj.name)
 

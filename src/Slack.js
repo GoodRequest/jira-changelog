@@ -4,9 +4,6 @@ import { URLSearchParams } from 'url'
 const API_ROOT = 'https://slack.com/api'
 const MSG_SIZE_LIMIT = 4000
 
-const cache = {}
-const pending = {}
-
 function compactObject(obj = {}) {
 	return Object.entries(obj).reduce((out, [key, value]) => {
 		if (typeof value !== 'undefined' && value !== null && value !== '') {
@@ -28,6 +25,8 @@ export default class Slack {
 	constructor(config) {
 		this.config = config
 		this.slackUsers = false
+		this.cache = {}
+		this.pending = {}
 	}
 
 	/**
@@ -71,12 +70,12 @@ export default class Slack {
 
 		const cacheKey = `${methodName}:${url}`
 
-		if (cachable && cache[cacheKey]) {
-			return Promise.resolve(cache[cacheKey])
+		if (cachable && this.cache[cacheKey]) {
+			return Promise.resolve(this.cache[cacheKey])
 		}
 
-		if (cachable && pending[cacheKey]) {
-			return pending[cacheKey]
+		if (cachable && this.pending[cacheKey]) {
+			return this.pending[cacheKey]
 		}
 
 		const request = fetch(url, {
@@ -87,7 +86,7 @@ export default class Slack {
 			.then((res) => res.json())
 			.then((data) => {
 				if (cachable && data && data.ok) {
-					cache[cacheKey] = data
+					this.cache[cacheKey] = data
 				}
 
 				return data
@@ -97,11 +96,11 @@ export default class Slack {
 			return request
 		}
 
-		pending[cacheKey] = request.finally(() => {
-			delete pending[cacheKey]
+		this.pending[cacheKey] = request.finally(() => {
+			delete this.pending[cacheKey]
 		})
 
-		return pending[cacheKey]
+		return this.pending[cacheKey]
 	}
 
 	/**

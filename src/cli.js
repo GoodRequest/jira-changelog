@@ -124,8 +124,9 @@ export async function postToSlack(config, data, changelogMessage) {
 
 /**
  * Convert a range string formatted as "a...b" or "a..b" into an object.
+ * Opaque git ranges such as "HEAD~3" are returned unchanged.
  * @param {String} rangeStr - The range string.
- * @return {Object}
+ * @return {Object|String}
  */
 export function parseRange(rangeStr) {
 	let parts = []
@@ -160,9 +161,10 @@ export function parseRange(rangeStr) {
 
 /**
  * Construct the range object from CLI arguments and config.
+ * Opaque git ranges are returned as strings so they can be passed directly to git.
  * @param {Object} config - Config object.
  * @param {Object} options - Parsed command line options.
- * @return {Promise<Object>}
+ * @return {Promise<Object|String>}
  */
 export async function getRangeObject(config, options) {
 	const range = {}

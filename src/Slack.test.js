@@ -114,6 +114,20 @@ describe('Slack API requests', () => {
 		await expect(second).resolves.toEqual({ ok: true, user: { id: 'U123' } })
 		expect(fetch).toHaveBeenCalledTimes(1)
 	})
+
+	test('keeps GET caches isolated between Slack instances', async () => {
+		const firstSlack = new Slack(newConfig({ apiKey: 'xoxb-first' }))
+		const secondSlack = new Slack(newConfig({ apiKey: 'xoxb-second' }))
+		fetch.mockResolvedValueOnce(await mockSlackResponse({ ok: true, user: { id: 'U1' } }))
+		fetch.mockResolvedValueOnce(await mockSlackResponse({ ok: true, user: { id: 'U2' } }))
+
+		await firstSlack.api('users.lookupByEmail', 'GET', { email: 'user@example.com' })
+		await secondSlack.api('users.lookupByEmail', 'GET', { email: 'user@example.com' })
+
+		expect(fetch).toHaveBeenCalledTimes(2)
+		expect(fetch.mock.calls[0][1].headers.Authorization).toBe('Bearer xoxb-first')
+		expect(fetch.mock.calls[1][1].headers.Authorization).toBe('Bearer xoxb-second')
+	})
 })
 
 describe('Slack posting behavior', () => {
