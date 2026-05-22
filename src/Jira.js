@@ -193,8 +193,13 @@ export default class Jira {
 		this.ticketPromises = {}
 		this.apiConfig = this.normalizeApiConfig(config?.jira?.api || {})
 
-		if (!this.apiConfig.host && !this.apiConfig.cloudId && !this.apiConfig.gatewayBase) {
-			console.error('ERROR: Cannot configure Jira without jira.api.host, jira.api.cloudId, or jira.api.gatewayBase.')
+		if (!this.apiConfig.useApiGateway && !this.apiConfig.host) {
+			console.error('ERROR: Jira legacy site-host mode requires jira.api.host.')
+			return
+		}
+
+		if (this.apiConfig.useApiGateway && !this.apiConfig.host && !this.apiConfig.cloudId && !this.apiConfig.gatewayBase) {
+			console.error('ERROR: Jira API gateway mode requires jira.api.host, jira.api.cloudId, or jira.api.gatewayBase.')
 			return
 		}
 
@@ -252,6 +257,10 @@ export default class Jira {
 
 	createJiraClient(apiConfig) {
 		const { useApiGateway, cloudId, gatewayHost, gatewayBase, host, email, token, apiVersion, options, basePath } = apiConfig
+
+		if (!useApiGateway && !host) {
+			throw new Error('ERROR: Jira legacy site-host mode requires jira.api.host.')
+		}
 
 		if (useApiGateway && !cloudId && !gatewayBase) {
 			throw new Error('ERROR: Jira API gateway mode requires a cloudId. Set jira.api.cloudId, set JIRA_API_CLOUD_ID, or ensure jira.api.host points to your Atlassian site host so cloudId can be resolved.')

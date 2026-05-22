@@ -173,7 +173,7 @@ export async function getRangeObject(config, options) {
 		return options.range
 	}
 
-	if (options.range && options.range.from) {
+	if (options.range && (options.range.from || options.range.to)) {
 		Object.assign(range, options.range)
 	}
 
@@ -195,14 +195,14 @@ export async function getRangeObject(config, options) {
 		const { all: allTags } = await workspace.tags()
 
 		if (Object.keys(range).length === 1) {
-			const rangeFromTagIndex = range.from ? allTags.findIndex((item) => item === range.from) : null
-			const rangeToTagIndex = range.to ? allTags.findIndex((item) => item === range.to) : null
+			const rangeFromTagIndex = range.from ? allTags.findIndex((item) => item === range.from) : -1
+			const rangeToTagIndex = range.to ? allTags.findIndex((item) => item === range.to) : -1
 
-			if (range.from && rangeFromTagIndex + 1 < allTags.length) {
+			if (range.from && rangeFromTagIndex >= 0 && rangeFromTagIndex + 1 < allTags.length) {
 				range.to = allTags[rangeFromTagIndex + 1]
 			}
 
-			if (range.to && rangeToTagIndex - 1 >= 0) {
+			if (range.to && rangeToTagIndex >= 0 && rangeToTagIndex - 1 >= 0) {
 				range.from = allTags[rangeToTagIndex - 1]
 			}
 		} else if (allTags.length >= 2) {

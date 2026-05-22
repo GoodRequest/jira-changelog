@@ -76,6 +76,7 @@ let config
 let jira
 let consoleLogSpy
 let consoleWarnSpy
+let consoleErrorSpy
 
 beforeEach(() => {
 	fetch.mockReset()
@@ -83,6 +84,7 @@ beforeEach(() => {
 	clearJiraEnv()
 	consoleLogSpy = jest.spyOn(console, 'log').mockImplementation(() => {})
 	consoleWarnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {})
+	consoleErrorSpy = jest.spyOn(console, 'error').mockImplementation(() => {})
 	config = newConfig({ cloudId: 'cloud-123' })
 	jira = new Jira(config)
 })
@@ -90,6 +92,7 @@ beforeEach(() => {
 afterEach(() => {
 	consoleLogSpy.mockRestore()
 	consoleWarnSpy.mockRestore()
+	consoleErrorSpy.mockRestore()
 	process.env = ORIGINAL_ENV
 })
 
@@ -258,6 +261,27 @@ describe('Jira REST client failures', () => {
 
 		await expect(jira.getJiraIssue('ENG-123')).rejects.toThrow('requires a cloudId when jira.api.resolveCloudId is false')
 		expect(fetch).not.toHaveBeenCalled()
+	})
+
+	test('does not create a legacy Jira client without a host even when cloudId is configured', () => {
+		config = newConfig({ host: undefined, cloudId: 'cloud-123', useApiGateway: false })
+		jira = new Jira(config)
+
+		expect(jira.jira).toBeUndefined()
+		expect(consoleErrorSpy).toHaveBeenCalledWith('ERROR: Jira legacy site-host mode requires jira.api.host.')
+	})
+
+	test('createJiraClient fails clearly for legacy mode without a host', () => {
+		config = newConfig({ cloudId: 'cloud-123', useApiGateway: false })
+		jira = new Jira(config)
+
+		expect(() =>
+			jira.createJiraClient({
+				...jira.apiConfig,
+				host: undefined,
+				useApiGateway: false
+			})
+		).toThrow('Jira legacy site-host mode requires jira.api.host')
 	})
 
 	test('wraps Jira auth and permission failures with context', async () => {
