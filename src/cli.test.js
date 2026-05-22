@@ -26,14 +26,28 @@ describe('cli parseRange', () => {
 		})
 	})
 
-	test('keeps opaque ranges as strings', () => {
-		expect(parseRange('HEAD~3')).toBe('HEAD~3')
+	test('parses single refs as from-only ranges', () => {
+		expect(parseRange('HEAD~3')).toEqual({
+			from: 'HEAD~3',
+			to: '',
+			symmetric: false
+		})
 	})
 })
 
 describe('cli getRangeObject', () => {
 	beforeEach(() => {
 		git.mockReset()
+	})
+
+	test('parses string range options into range objects', async () => {
+		await expect(getRangeObject({ gitPath: '/repo' }, { range: 'HEAD~3' })).resolves.toEqual({
+			from: 'HEAD~3',
+			to: '',
+			symmetric: false
+		})
+
+		expect(git).not.toHaveBeenCalled()
 	})
 
 	test('infers the next tag when only an existing from tag is configured', async () => {

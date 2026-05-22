@@ -76,7 +76,7 @@ export function readConfigFile(cwd) {
 		}
 	}
 
-	return defaultValues(localConf, defaultConfig)
+	return defaultValues(localConf, getDefaultConfig())
 }
 
 /**

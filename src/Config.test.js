@@ -70,4 +70,13 @@ describe('Default values', () => {
 			arr2: [6, 7, 8]
 		})
 	})
+
+	test('returns fresh default config values for each read', () => {
+		const first = Config.defaultValues({}, Config.getDefaultConfig())
+		first.jira.includeIssueTypes.push('Injected')
+
+		const second = Config.defaultValues({}, Config.getDefaultConfig())
+
+		expect(second.jira.includeIssueTypes).not.toContain('Injected')
+	})
 })
