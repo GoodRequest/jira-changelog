@@ -284,6 +284,23 @@ describe('Jira REST client failures', () => {
 		).toThrow('Jira legacy site-host mode requires jira.api.host')
 	})
 
+	test('clears cached async Jira client promise after cloudId resolution failure', async () => {
+		config = newConfig()
+		jira = new Jira(config)
+		fetch.mockResolvedValueOnce(mockJsonResponse({ error: 'temporary failure' }, 500, 'Internal Server Error'))
+		fetch.mockResolvedValueOnce(mockJsonResponse({ cloudId: 'resolved-after-retry' }))
+		fetch.mockResolvedValueOnce(mockJsonResponse(DEFAULT_TICKET()))
+
+		await expect(jira.getJiraIssue('ENG-123')).rejects.toThrow('Could not resolve Jira cloudId: 500 Internal Server Error')
+		await expect(jira.getJiraIssue('ENG-123')).resolves.toEqual(DEFAULT_TICKET())
+
+		expect(fetch.mock.calls.map((call) => call[0])).toEqual([
+			'https://example.atlassian.net/_edge/tenant_info',
+			'https://example.atlassian.net/_edge/tenant_info',
+			'https://api.atlassian.com/ex/jira/resolved-after-retry/rest/api/3/issue/ENG-123'
+		])
+	})
+
 	test('wraps Jira auth and permission failures with context', async () => {
 		fetch.mockResolvedValueOnce(mockJsonResponse({ errorMessages: ['Forbidden'] }, 403, 'Forbidden'))
 
@@ -376,6 +393,31 @@ describe('Fetch ticket objects from Jira', () => {
 
 		expect(jira.fetchJiraTicket).toHaveBeenCalledTimes(2)
 		expect(commit.tickets.map((ticket) => ticket.key)).toEqual(['ENG-123', 'ENG-124'])
+	})
+
+	test('generate keeps changelog generation going when one commit only references a missing ticket', async () => {
+		const missing = new Error('Not found')
+		missing.status = 404
+		jira.findJiraInCommit = jest
+			.fn()
+			.mockResolvedValueOnce({ fullText: '[ENG-123]', tickets: [DEFAULT_TICKET({ id: 'ENG-123', key: 'ENG-123' })] })
+			.mockRejectedValueOnce(missing)
+			.mockResolvedValueOnce({ fullText: '[ENG-456]', tickets: [DEFAULT_TICKET({ id: 'ENG-456', key: 'ENG-456' })] })
+
+		const logs = await jira.generate([{ fullText: '[ENG-123]' }, { fullText: '[MISSING-1]' }, { fullText: '[ENG-456]' }])
+
+		expect(logs).toHaveLength(3)
+		expect(logs[0].tickets.map((ticket) => ticket.key)).toEqual(['ENG-123'])
+		expect(logs[1]).toEqual({ fullText: '[MISSING-1]', tickets: [] })
+		expect(logs[2].tickets.map((ticket) => ticket.key)).toEqual(['ENG-456'])
+	})
+
+	test('generate still fails fast for non-404 Jira errors', async () => {
+		const forbidden = new Error('Forbidden')
+		forbidden.status = 403
+		jira.findJiraInCommit = jest.fn().mockRejectedValue(forbidden)
+
+		await expect(jira.generate([{ fullText: '[ENG-123]' }])).rejects.toThrow('Forbidden')
 	})
 
 	test('does not swallow Jira auth or permission errors', async () => {

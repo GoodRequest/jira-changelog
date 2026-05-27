@@ -282,7 +282,10 @@ export default class Jira {
 		}
 
 		if (!this.jiraClientPromise) {
-			this.jiraClientPromise = this.createJiraClientAsync()
+			this.jiraClientPromise = this.createJiraClientAsync().catch((err) => {
+				this.jiraClientPromise = undefined
+				throw err
+			})
 		}
 
 		return this.jiraClientPromise
@@ -331,7 +334,7 @@ export default class Jira {
 
 	async generate(commitLogs, releaseVersion = null) {
 		this.releaseVersions = []
-		const logs = await Promise.all(commitLogs.map((commit) => this.findJiraInCommit(commit)))
+		const logs = await Promise.all(commitLogs.map((commit) => this.findJiraInCommitSafe(commit)))
 
 		const ticketsHash = {}
 		logs.forEach((log) => {
@@ -350,6 +353,18 @@ export default class Jira {
 		}
 
 		return logs
+	}
+
+	async findJiraInCommitSafe(commitLog) {
+		try {
+			return await this.findJiraInCommit(commitLog)
+		} catch (err) {
+			if (this.isNotFoundError(err)) {
+				return Object.assign({ tickets: [] }, { ...commitLog })
+			}
+
+			throw err
+		}
 	}
 
 	async findJiraInCommit(commitLog) {
