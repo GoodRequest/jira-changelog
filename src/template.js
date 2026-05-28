@@ -2,44 +2,20 @@ import ejs from 'ejs'
 import _ from 'lodash'
 
 /**
- * Filter revert commits out of a commit log list, if the original commit is present.
- * i.e. for each revert there are 2 commits: the original commit & the commit which was reverted.
- * We only need to keep one of them.
- *
- * For example input:
- * ```
- *    const logs = [
- *      { revision: 10 },
- *      { revision: 11, reverted: 5, }, // original commit not present
- *      { revision: 12 },
- *      { revision: 13, reverted: 10 }, // original commit is present
- *    ];
- * ```
- *
- * Will create this output:
- * ```
- *    {
- *      { revision: 10, reverted: 13 } // reverted BY 13
- *      { revision: 11, reverted: 5, } // reverted 5, which is not present
- *      { revision: 12 },
- *    }
- * ```
- *  + Revision 13 is removed because it merely reverts revision 10
- *  + Revision 11 remains because the commit is reverts is not in the list.
- *
- * @param {Array} logs - List of commit logs
- * @return {Object} containing: reverted, current
+ * Filter revert commits out of a commit log list when the original commit is present.
+ * @param {Array} logs - List of commit logs.
+ * @return {Array}
  */
 export function filterRevertedCommits(logs) {
-	// Convenient commit lookup
 	const commitHash = {}
-	logs.forEach((l) => (commitHash[l.revision] = l))
+	logs.forEach((log) => {
+		commitHash[log.revision] = log
+	})
 
-	// Track reverted commits, and only keep one of the commits (orig or reverter)
 	const reduced = logs.reduce((acc, log) => {
 		if (log.reverted) {
-			// If the commit we're reverting is in the list, remove the revert commit
 			const revertedCommit = commitHash[log.reverted]
+
 			if (revertedCommit) {
 				revertedCommit.revertedBy = log.revision
 				acc.add(revertedCommit)
@@ -49,6 +25,7 @@ export function filterRevertedCommits(logs) {
 		} else {
 			acc.add(log)
 		}
+
 		return acc
 	}, new Set())
 
@@ -56,9 +33,8 @@ export function filterRevertedCommits(logs) {
 }
 
 /**
- * Mark tickets as reverted, if their latest git commit was a commit.
- *
- * @param {Array} tickets - Array of jira ticket objects, each with a commit list
+ * Mark tickets as reverted if their latest commit is a revert.
+ * @param {Array} tickets - Jira ticket objects with commit lists.
  * @return {Array}
  */
 export function decorateTicketReverts(tickets) {
@@ -67,66 +43,61 @@ export function decorateTicketReverts(tickets) {
 			ticket.reverted = null
 			return
 		}
+
 		const commits = _.sortBy(ticket.commits, (commit) => commit.date).reverse()
 		const lastCommit = commits[0]
 		ticket.reverted = lastCommit.reverted || lastCommit.revertedBy
 	})
+
 	return tickets
 }
 
 /**
- * Fetch the contact information of the reporters of a list of tickets.
- *
+ * Fetch reporter contact information for a list of tickets.
  * @param {Array} tickets
- * @return {Object}
+ * @return {Array}
  */
 export function getTicketReporters(tickets) {
 	const reporters = {}
 
 	tickets.forEach((ticket) => {
-		const { email, displayName } = ticket.fields.reporter || []
+		const reporter = ticket?.fields?.reporter || {}
+		const email = reporter.emailAddress || reporter.email || 'Unknown'
+		const name = reporter.displayName || email
+
 		if (!reporters[email]) {
-			reporters[email] = {
-				email,
-				name: displayName,
-				tickets: [ticket]
-			}
+			reporters[email] = { email, name, tickets: [ticket] }
 		} else {
 			reporters[email].tickets.push(ticket)
 		}
 	})
 
-	// Sort list by name
 	return _.sortBy(Object.values(reporters), (item) => item.name)
 }
 
 /**
- * Return the Jira tickets who's status does not match the possible "approvalStatus" values
- * in the config.
- * @param {Object} config - The config object provided by Config.getConfigForPath
- * @param {Array} tickets - List of Jira tickets
- * @param {Array}
+ * Split Jira tickets by approval status.
+ * @param {Object} config - Configuration object.
+ * @param {Array} tickets - Jira tickets.
+ * @return {Object}
  */
 export function groupTicketsByStatus(config, tickets) {
 	let { approvalStatus } = config.jira
+
 	if (!approvalStatus) {
-		return {
-			approved: [],
-			pending: tickets
-		}
+		return { approved: [], pending: tickets }
 	}
 
 	if (!Array.isArray(approvalStatus)) {
 		approvalStatus = [approvalStatus]
 	}
 
-	const out = {
-		approved: [],
-		pending: []
-	}
-	const statusMatch = approvalStatus.map((s) => s.toLowerCase())
+	const statusMatch = approvalStatus.map((status) => String(status).toLowerCase())
+	const out = { approved: [], pending: [] }
+
 	tickets.forEach((ticket) => {
-		const name = ticket.fields.status.name.toLowerCase()
+		const name = String(ticket?.fields?.status?.name || '').toLowerCase()
+
 		if (statusMatch.includes(name)) {
 			out.approved.push(ticket)
 		} else {
@@ -139,86 +110,64 @@ export function groupTicketsByStatus(config, tickets) {
 
 /**
  * Filter commit logs into template data.
- *
- * Data:
- * -----
- *  {
- *    commits: {
- *      all: [],       // all commits
- *      tickets: [],   // commits associated with jira tickets
- *      noTickets: [], // commits not associated with jira tickets
- *    },
- *    tickets: {
- *      all: [],       // all tickets
- *      approved: [],  // tickets marked as approved
- *      pending: [],   // tickets not marked as approved
- *      pendingByOwner: [], // pending tickets arranged under ticket reporters.
- *    }
- *  }
- *
- * @param {Object} config - The config object provided by Config.getConfigForPath
- * @param {Array} logs - List of commit logs and their jira tickets.
- *
- * @return {Promise} Resolves to an object with filtered commit/ticket data
+ * @param {Object} config - Configuration object.
+ * @param {Array} logs - Commit logs with Jira tickets.
+ * @return {Object}
  */
 export function transformCommitLogs(config, logs) {
-	// Filter reverts
 	const reducedLogs = filterRevertedCommits(logs)
-
-	// Organize logs by jira ticket keys
 	const ticketHash = reducedLogs.reduce((all, log) => {
-		log.tickets.forEach((ticket) => {
+		;(log.tickets || []).forEach((ticket) => {
 			all[ticket.key] = all[ticket.key] || ticket
 			all[ticket.key].commits = all[ticket.key].commits || []
 			all[ticket.key].commits.push(log)
 		})
+
 		return all
 	}, {})
 
-	// Mark tickets as reverted
 	decorateTicketReverts(Object.values(ticketHash))
 
-	// Sort tickets by type name and get pending tickets
-	let ticketList = _.sortBy(Object.values(ticketHash), (ticket) => ticket.fields.issuetype.name)
-	let tixByStatus = groupTicketsByStatus(config, ticketList)
+	const ticketList = _.sortBy(Object.values(ticketHash), (ticket) => ticket?.fields?.issuetype?.name || '')
+	const tixByStatus = groupTicketsByStatus(config, ticketList)
 	const pendingByOwner = getTicketReporters(tixByStatus.pending)
 
-	// Output filtered data
 	return {
 		commits: {
 			all: reducedLogs,
-			tickets: reducedLogs.filter((commit) => commit.tickets.length),
-			noTickets: reducedLogs.filter((commit) => !commit.tickets.length),
-			reverted: reducedLogs.filter((l) => l.reverted || l.revertedBy)
+			tickets: reducedLogs.filter((commit) => commit.tickets && commit.tickets.length),
+			noTickets: reducedLogs.filter((commit) => !commit.tickets || !commit.tickets.length),
+			reverted: reducedLogs.filter((log) => log.reverted || log.revertedBy)
 		},
 		tickets: {
 			pendingByOwner,
 			all: ticketList,
 			approved: tixByStatus.approved,
 			pending: tixByStatus.pending,
-			reverted: ticketList.filter((t) => t.reverted)
+			reverted: ticketList.filter((ticket) => ticket.reverted)
 		}
 	}
 }
 
 /**
- * Create data object for the changelog template
- *
- * @param {Object} config - The configuration object
- * @param {Array} changelog - The changelog list.
+ * Create data object for the changelog template.
+ * @param {Object} config - Configuration object.
+ * @param {Array} changelog - Changelog list.
  * @param {Array} releaseVersions - Jira release versions for this changelog.
- *
- * @return {String}
+ * @return {Promise<Object>}
  */
 export async function generateTemplateData(config, changelog, releaseVersions) {
-	let data = await transformCommitLogs(config, changelog)
+	let data = transformCommitLogs(config, changelog)
+
 	if (typeof config.transformData == 'function') {
 		data = await Promise.resolve(config.transformData(data))
 	}
+
 	data.jira = {
 		baseUrl: config.jira.baseUrl,
-		releaseVersions: releaseVersions
+		releaseVersions
 	}
+
 	data.options = {
 		hideEmptyBlocks: !!config.hideEmptyBlocks
 	}
@@ -228,12 +177,26 @@ export async function generateTemplateData(config, changelog, releaseVersions) {
 
 /**
  * Render the changelog template and provide output.
- *
- * @param {Object} config - The configuration object
- * @param {Array} data - Template data created by `generateTemplateData()`
- *
+ * @param {Object} config - Configuration object.
+ * @param {Object} data - Template data.
  * @return {String}
  */
 export function renderTemplate(config, data) {
 	return ejs.render(config.template, data)
+}
+
+export async function generate(changelog, config, releaseVersions = []) {
+	const data = await generateTemplateData(config, changelog, releaseVersions)
+	return renderTemplate(config, data)
+}
+
+export default {
+	filterRevertedCommits,
+	decorateTicketReverts,
+	getTicketReporters,
+	groupTicketsByStatus,
+	transformCommitLogs,
+	generateTemplateData,
+	renderTemplate,
+	generate
 }

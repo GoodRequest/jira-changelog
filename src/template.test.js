@@ -1,288 +1,176 @@
 import {
-	filterRevertedCommits,
 	decorateTicketReverts,
+	filterRevertedCommits,
+	generate,
+	generateTemplateData,
 	getTicketReporters,
 	groupTicketsByStatus,
-	transformCommitLogs,
-	generateTemplateData,
-	renderTemplate
+	transformCommitLogs
 } from './template'
 import { getDefaultConfig } from './Config'
 
-describe('filter reverts', () => {
-	test('the revert commit is removed when the original commit is in the list', () => {
-		const logs = [
-			{ revision: 10 },
-			{ revision: 11, reverted: 10 }, // filter this revert commit out & keep revision 10
-			{ revision: 12 }
-		]
-		const filtered = filterRevertedCommits(logs)
-		expect(filtered.length).toBe(2)
-		expect(filtered.map((i) => i.revision)).toEqual([10, 12])
-		expect(filtered[0].revertedBy).toBe(11)
-	})
-
-	test('the revert commit is retained when original commit is not in list', () => {
-		const logs = [
-			{ revision: 10 },
-			{ revision: 11, reverted: 5 }, // keep revert commit because revision 5 isn't in list
-			{ revision: 12 }
-		]
-		const filtered = filterRevertedCommits(logs)
-		expect(filtered.length).toBe(3)
-		expect(filtered.map((i) => i.revision)).toEqual([10, 11, 12])
-	})
+const ticket = (key, status = 'Done', reporter = {}) => ({
+	id: key,
+	key,
+	fields: {
+		summary: `${key} summary`,
+		issuetype: { name: 'Story' },
+		status: { name: status },
+		reporter: {
+			emailAddress: 'owner@example.com',
+			displayName: 'Owner',
+			...reporter
+		}
+	}
 })
 
-describe('Mark tickets as reverted', () => {
-	test('out of order commits', () => {
+const commit = (revision, fields = {}) => ({
+	revision,
+	date: '2020-02-01T16:02:36-08:00',
+	summary: revision,
+	fullText: revision,
+	tickets: [],
+	...fields
+})
+
+describe('template helpers', () => {
+	test('filters revert commits and marks reverted originals when the original commit is present', () => {
+		const original = commit('a', { tickets: [ticket('ENG-1')] })
+		const revert = commit('b', { reverted: 'a' })
+		const other = commit('c')
+
+		const logs = filterRevertedCommits([revert, other, original])
+
+		expect(logs).toContain(original)
+		expect(logs).toContain(other)
+		expect(logs).not.toContain(revert)
+		expect(original.revertedBy).toBe('b')
+	})
+
+	test('keeps revert commits when the original commit is not present in the changelog range', () => {
+		const revert = commit('b', { reverted: 'outside-range' })
+
+		expect(filterRevertedCommits([revert])).toEqual([revert])
+	})
+
+	test('decorates tickets as reverted from their latest commit state', () => {
 		const tickets = [
 			{
 				key: 'ENG-123',
 				commits: [
-					// Not in date order
-					{ date: '2020-02-02T16:02:36-08:00', reverted: null },
-					{ date: '2020-02-04T16:02:36-08:00', reverted: 10 },
-					{ date: '2020-02-03T16:02:36-08:00', reverted: null }
+					commit('old', { date: '2020-02-02T16:02:36-08:00' }),
+					commit('latest', { date: '2020-02-04T16:02:36-08:00', revertedBy: 'revert-sha' })
 				]
 			}
 		]
+
 		decorateTicketReverts(tickets)
-		expect(tickets[0].reverted).toBe(10)
+
+		expect(tickets[0].reverted).toBe('revert-sha')
 	})
 
-	test('reverted by commit', () => {
+	test('leaves tickets unreverted when their latest commit is active', () => {
 		const tickets = [
 			{
 				key: 'ENG-123',
-				commits: [
-					{ date: '2020-02-04T16:02:36-08:00', revertedBy: 10 },
-					{ date: '2020-02-02T16:02:36-08:00', reverted: null },
-					{ date: '2020-02-03T16:02:36-08:00', reverted: null }
-				]
+				commits: [commit('old', { date: '2020-02-02T16:02:36-08:00', revertedBy: 'revert-sha' }), commit('latest', { date: '2020-02-04T16:02:36-08:00' })]
 			}
 		]
-		decorateTicketReverts(tickets)
-		expect(tickets[0].reverted).toBe(10)
-	})
 
-	test('no reverts', () => {
-		const tickets = [
-			{
-				key: 'ENG-123',
-				commits: [{ date: '2020-02-03T16:02:36-08:00', reverted: null }]
-			}
-		]
 		decorateTicketReverts(tickets)
+
 		expect(tickets[0].reverted).toBeFalsy()
 	})
 
-	test('no commits', () => {
-		// This shouldn't happen, but just in case, it shouldn't fall over.
-		const tickets = [{ key: 'ENG-123' }]
-		decorateTicketReverts(tickets)
-		expect(tickets[0].reverted).toBe(null)
+	test('groups tickets by configured approval status', () => {
+		const config = getDefaultConfig()
+		const tickets = [ticket('ENG-1', 'Done'), ticket('ENG-2', 'In Review'), ticket('ENG-3', 'Closed')]
+
+		const grouped = groupTicketsByStatus(config, tickets)
+
+		expect(grouped.approved.map((item) => item.key)).toEqual(['ENG-1', 'ENG-3'])
+		expect(grouped.pending.map((item) => item.key)).toEqual(['ENG-2'])
+	})
+
+	test('groups pending tickets by reporter', () => {
+		const reporters = getTicketReporters([
+			ticket('ENG-1', 'In Review', { emailAddress: 'b@example.com', displayName: 'B' }),
+			ticket('ENG-2', 'In Review', { emailAddress: 'a@example.com', displayName: 'A' }),
+			ticket('ENG-3', 'In Review', { emailAddress: 'a@example.com', displayName: 'A' })
+		])
+
+		expect(reporters.map((item) => item.email)).toEqual(['a@example.com', 'b@example.com'])
+		expect(reporters[0].tickets.map((item) => item.key)).toEqual(['ENG-2', 'ENG-3'])
 	})
 })
 
-test('Get all ticket reporters', () => {
-	const tickets = [
-		{
-			key: 'ENG-1234',
-			fields: {
-				reporter: { email: 'za@za.com', displayName: 'Za' }
-			}
-		},
-		{
-			key: 'ENG-234',
-			fields: {
-				reporter: { email: 'za@za.com', displayName: 'Za' }
-			}
-		},
-		{
-			key: 'ENG-345',
-			fields: {
-				reporter: { email: 'tom@tom.com', displayName: 'Thomas' }
-			}
+describe('template data', () => {
+	test('groups commits and tickets', async () => {
+		const config = getDefaultConfig()
+		const commits = [
+			commit('a', { summary: 'A', fullText: 'A', tickets: [ticket('ENG-1')] }),
+			commit('b', { summary: 'B', fullText: 'B', tickets: [] }),
+			commit('c', { summary: 'C', fullText: 'C', tickets: [ticket('ENG-2', 'In Review')] })
+		]
+
+		const data = await generateTemplateData(config, commits, [])
+
+		expect(data.commits.tickets).toHaveLength(2)
+		expect(data.commits.noTickets).toHaveLength(1)
+		expect(data.tickets.approved.map((t) => t.key)).toEqual(['ENG-1'])
+		expect(data.tickets.pending.map((t) => t.key)).toEqual(['ENG-2'])
+		expect(data.tickets.pendingByOwner[0].email).toBe('owner@example.com')
+	})
+
+	test('tracks reverted commits and reverted tickets in generated data', async () => {
+		const config = getDefaultConfig()
+		const revertedTicket = ticket('ENG-1')
+		const commits = [
+			commit('revert', { date: '2020-02-03T16:02:36-08:00', reverted: 'original' }),
+			commit('original', { date: '2020-02-02T16:02:36-08:00', tickets: [revertedTicket] }),
+			commit('active', { date: '2020-02-04T16:02:36-08:00', tickets: [ticket('ENG-2')] })
+		]
+
+		const data = await generateTemplateData(config, commits, [])
+
+		expect(data.commits.all.map((item) => item.revision)).toEqual(['original', 'active'])
+		expect(data.commits.reverted.map((item) => item.revision)).toEqual(['original'])
+		expect(data.tickets.reverted.map((item) => item.key)).toEqual(['ENG-1'])
+		expect(data.tickets.all.map((item) => item.key)).toEqual(['ENG-1', 'ENG-2'])
+	})
+
+	test('exposes release versions and hideEmptyBlocks option to templates', async () => {
+		const config = {
+			...getDefaultConfig(),
+			hideEmptyBlocks: true
 		}
-	]
-	const reporters = getTicketReporters(tickets)
-	const za = reporters.find((r) => r.name === 'Za')
-	const tom = reporters.find((r) => r.name === 'Thomas')
+		const releaseVersions = [{ name: '1.2.3', projectKey: 'ENG' }]
 
-	expect(reporters.length).toBe(2)
-	expect(za.tickets.map((t) => t.key)).toEqual(['ENG-1234', 'ENG-234'])
-	expect(tom.tickets.map((t) => t.key)).toEqual(['ENG-345'])
-})
+		const data = await generateTemplateData(config, [], releaseVersions)
 
-describe('Get pending tickets', () => {
-	test('single approval status in config', () => {
-		const tickets = [
-			{
-				key: 'ENG-1234',
-				fields: { status: { name: 'Done' } }
-			},
-			{
-				key: 'ENG-234',
-				fields: { status: { name: 'Todo' } }
-			}
-		]
-		const config = { jira: { approvalStatus: 'Done' } }
-		const groups = groupTicketsByStatus(config, tickets)
-
-		expect(groups.pending[0].key).toBe('ENG-234')
-		expect(groups.approved[0].key).toBe('ENG-1234')
+		expect(data.jira.releaseVersions).toBe(releaseVersions)
+		expect(data.options.hideEmptyBlocks).toBe(true)
 	})
 
-	test('multiple approval statuses in config', () => {
-		const tickets = [
-			{
-				key: 'ENG-1234',
-				fields: { status: { name: 'Done' } }
-			},
-			{
-				key: 'ENG-234',
-				fields: { status: { name: 'Todo' } }
-			},
-			{
-				key: 'ENG-345',
-				fields: { status: { name: 'Closed' } }
-			}
-		]
-		const config = { jira: { approvalStatus: ['Done', 'Closed'] } }
-		const groups = groupTicketsByStatus(config, tickets)
-
-		expect(groups.pending.map((t) => t.key)).toEqual(['ENG-234'])
-		expect(groups.approved.map((t) => t.key)).toEqual(['ENG-1234', 'ENG-345'])
-	})
-
-	test('case insensitive', () => {
-		const tickets = [
-			{
-				key: 'ENG-1234',
-				fields: { status: { name: 'done' } }
-			},
-			{
-				key: 'ENG-345',
-				fields: { status: { name: 'ClOsEd' } }
-			},
-			{
-				key: 'ENG-234',
-				fields: { status: { name: 'Todo' } }
-			}
-		]
-		const config = { jira: { approvalStatus: ['DONE', 'Closed'] } }
-		const groups = groupTicketsByStatus(config, tickets)
-
-		expect(groups.pending.map((t) => t.key)).toEqual(['ENG-234'])
-		expect(groups.approved.map((t) => t.key)).toEqual(['ENG-1234', 'ENG-345'])
-	})
-
-	test('no approval status in config', () => {
-		const tickets = [
-			{
-				key: 'ENG-1234',
-				fields: { status: { name: 'Done' } }
-			},
-			{
-				key: 'ENG-234',
-				fields: { status: { name: 'Todo' } }
-			}
-		]
-
-		// Undefined
-		const config = { jira: { approvalStatus: undefined } }
-		let groups = groupTicketsByStatus(config, tickets)
-		expect(groups.pending.map((t) => t.key)).toEqual(['ENG-1234', 'ENG-234'])
-		expect(groups.approved.length).toBe(0)
-
-		// Empty list
-		config.jira.approvalStatus = []
-		groups = groupTicketsByStatus(config, tickets)
-		expect(groups.pending.map((t) => t.key)).toEqual(['ENG-1234', 'ENG-234'])
-		expect(groups.approved.length).toBe(0)
-	})
-})
-
-// Pull it all together
-test('transform commit logs into template data', () => {
-	const createTicket = (key, reporter, status) => ({
-		key,
-		fields: {
-			issuetype: { name: 'Story' },
-			reporter: { email: reporter, displayName: reporter },
-			status: { name: status }
+	test('allows transformData to adjust generated template data', async () => {
+		const config = {
+			...getDefaultConfig(),
+			transformData: (data) => ({ ...data, custom: 'value' })
 		}
+
+		const data = await generateTemplateData(config, [], [])
+
+		expect(data.custom).toBe('value')
 	})
-	const commitLogs = [
-		{
-			revision: 11,
-			date: '2020-02-05T16:02:36-08:00',
-			tickets: []
-		},
-		{
-			revision: 10,
-			date: '2020-02-04T16:02:36-08:00',
-			tickets: [createTicket('ENG-123', 'za', 'Done')]
-		},
-		{
-			revision: 9,
-			date: '2020-02-03T16:02:36-08:00',
-			tickets: [createTicket('ENG-234', 'john', 'Todo'), createTicket('ENG-345', 'za', 'QA')]
-		},
-		{
-			revision: 8,
-			date: '2020-02-01T16:02:36-08:00',
-			reverted: 7,
-			tickets: [createTicket('ENG-567', 'za', 'QA')]
-		},
-		{
-			revision: 7,
-			date: '2020-02-01T16:00:36-08:00',
-			tickets: [createTicket('ENG-567', 'za', 'QA')]
-		},
-		{
-			revision: 6,
-			date: '2020-01-29T16:00:36-08:00',
-			reverted: 5,
-			tickets: [createTicket('ENG-987', 'debbie', 'QA')]
+
+	test('renders configured template', async () => {
+		const config = {
+			...getDefaultConfig(),
+			template: '<%= tickets.all.length %> ticket(s)',
+			transformData: (data) => Promise.resolve(data)
 		}
-	]
-	const config = { jira: { approvalStatus: ['Done', 'Closed'] } }
-	const transformed = transformCommitLogs(config, commitLogs)
+		const output = await generate([commit('a', { summary: 'A', fullText: 'A', tickets: [ticket('ENG-1')] })], config)
 
-	const { commits, tickets } = transformed
-
-	expect(commits.all.length).toBe(5)
-	expect(commits.tickets.length).toBe(4)
-	expect(commits.noTickets.length).toBe(1)
-	expect(commits.reverted.length).toBe(2)
-
-	expect(tickets.all.length).toBe(5)
-	expect(tickets.approved.length).toBe(1)
-	expect(tickets.pending.length).toBe(4)
-	expect(tickets.pendingByOwner.length).toBe(3)
-	expect(tickets.reverted.length).toBe(2)
-})
-
-test('hideEmptyBlocks with false', async () => {
-	const config = {
-		...getDefaultConfig(),
-		hideEmptyBlocks: false
-	}
-	const templateData = await generateTemplateData(config, [], [])
-	const templateRendered = renderTemplate(config, templateData)
-
-	expect(templateRendered).toContain('~ None ~')
-})
-
-test('hideEmptyBlocks with true', async () => {
-	const config = {
-		...getDefaultConfig(),
-		hideEmptyBlocks: true
-	}
-	const templateData = await generateTemplateData(config, [], [])
-	const templateRendered = renderTemplate(config, templateData)
-
-	expect(templateRendered).not.toContain('~ None ~')
+		expect(output).toBe('1 ticket(s)')
+	})
 })

@@ -1,267 +1,141 @@
 import SourceControl from './SourceControl'
-import { getDefaultConfig } from './Config'
+import git from 'simple-git'
 
-const source = new SourceControl()
-
-/**
- * Test git log graph:
- *
- *    1
- *    2 ⟍
- *    3   2a
- *    4   2b
- *    5 ⟋
- *    6 ⟍
- *    7   6a ⟍
- *        6b   6a1
- *             6a2
- *    8   6c ⟋
- *    9 ⟋
- *    10
- */
-let testGitLogs = []
+jest.mock('simple-git', () => jest.fn())
 
 beforeEach(() => {
-	testGitLogs = [
-		{
-			revision: '10',
-			parents: '9',
-			date: '2020-01-23 15:52:51 -0800',
-			summary: 'rev 10',
-			fullText: 'Full rev 10',
-			authorName: 'Za',
-			authorEmail: 'Za@nowhere.com'
-		},
-		{
-			revision: '9',
-			parents: '8 6c',
-			date: '2020-01-23 15:52:51 -0800',
-			summary: 'rev 9',
-			fullText: 'Full rev 9',
-			authorName: 'Za',
-			authorEmail: 'Za@nowhere.com'
-		},
-		{
-			revision: '8',
-			parents: '7',
-			date: '2020-01-23 15:52:51 -0800',
-			summary: 'rev 8',
-			fullText: 'Full rev 8',
-			authorName: 'Za',
-			authorEmail: 'Za@nowhere.com'
-		},
-		{
-			revision: '6c',
-			parents: '6b 6a2',
-			date: '2020-01-23 15:52:51 -0800',
-			summary: 'rev 6c',
-			fullText: 'Full rev 6c',
-			authorName: 'Za',
-			authorEmail: 'Za@nowhere.com'
-		},
-		{
-			revision: '6b',
-			parents: '6a',
-			date: '2020-01-23 15:52:51 -0800',
-			summary: 'rev 6b',
-			fullText: 'Full rev 6b',
-			authorName: 'Za',
-			authorEmail: 'Za@nowhere.com'
-		},
-		{
-			revision: '6a2',
-			parents: '6a1',
-			date: '2020-01-23 15:52:51 -0800',
-			summary: 'rev 6a2',
-			fullText: 'Full rev 6a2',
-			authorName: 'Za',
-			authorEmail: 'Za@nowhere.com'
-		},
-		{
-			revision: '6a1',
-			parents: '6a',
-			date: '2020-01-23 15:52:51 -0800',
-			summary: 'rev 6a1',
-			fullText: 'Full rev 6a1',
-			authorName: 'Za',
-			authorEmail: 'Za@nowhere.com'
-		},
-		{
-			revision: '6a',
-			parents: '6',
-			date: '2020-01-23 15:52:51 -0800',
-			summary: 'rev 6',
-			fullText: 'Full rev 6',
-			authorName: 'Za',
-			authorEmail: 'Za@nowhere.com'
-		},
-		{
-			revision: '7',
-			parents: '6',
-			date: '2020-01-23 15:52:51 -0800',
-			summary: 'rev 7',
-			fullText: 'Full rev 7',
-			authorName: 'Za',
-			authorEmail: 'Za@nowhere.com'
-		},
-		{
-			revision: '6',
-			parents: '5',
-			date: '2020-01-23 15:52:51 -0800',
-			summary: 'rev 6',
-			fullText: 'Full rev 6',
-			authorName: 'Za',
-			authorEmail: 'Za@nowhere.com'
-		},
-		{
-			revision: '5',
-			parents: '4 2b',
-			date: '2020-01-23 15:52:51 -0800',
-			summary: 'rev 5',
-			fullText: 'Full rev 5',
-			authorName: 'Za',
-			authorEmail: 'Za@nowhere.com'
-		},
-		{
-			revision: '2b',
-			parents: '2a',
-			date: '2020-01-23 15:52:51 -0800',
-			summary: 'rev 2b',
-			fullText: 'Full rev 2b',
-			authorName: 'Za',
-			authorEmail: 'Za@nowhere.com'
-		},
-		{
-			revision: '2a',
-			parents: '2',
-			date: '2020-01-23 15:52:51 -0800',
-			summary: 'rev 2a',
-			fullText: 'Full rev 2a',
-			authorName: 'Za',
-			authorEmail: 'Za@nowhere.com'
-		},
-		{
-			revision: '4',
-			parents: '3',
-			date: '2020-01-23 15:52:51 -0800',
-			summary: 'rev 4',
-			fullText: 'Full rev 4',
-			authorName: 'Za',
-			authorEmail: 'Za@nowhere.com'
-		},
-		{
-			revision: '3',
-			parents: '2',
-			date: '2020-01-23 15:52:51 -0800',
-			summary: 'rev 3',
-			fullText: 'Full rev 3',
-			authorName: 'Za',
-			authorEmail: 'Za@nowhere.com'
-		},
-		{
-			revision: '2',
-			parents: '1',
-			date: '2020-01-23 15:52:51 -0800',
-			summary: 'rev 2',
-			fullText: 'Full rev 2',
-			authorName: 'Za',
-			authorEmail: 'Za@nowhere.com'
-		},
-		{
-			revision: '1',
-			parents: '0',
-			date: '2020-01-23 15:52:51 -0800',
-			summary: 'rev 1',
-			fullText: 'Full rev 1',
-			authorName: 'Za',
-			authorEmail: 'Za@nowhere.com'
-		}
-	]
+	git.mockReset()
 })
 
-describe('Build history graph', () => {
-	let graph
-	let combinedMessages
-
-	beforeEach(() => {
-		graph = source.simpleTopLevelGraph(testGitLogs)
-		combinedMessages = source.consolodateCommitMessages(graph)
-	})
-
-	test('Top-level logs should not contain merged revisions', () => {
-		const revisions = graph.map((i) => i.revision)
-		expect(revisions).toEqual(['10', '9', '8', '7', '6', '5', '4', '3', '2', '1'])
-	})
-
-	test('Simple 1-level nested merged', () => {
-		// console.log(graph.find(i => i.revision === '2'));
-		const revisions = graph.find((i) => i.revision === '5').graph.merged.map((i) => i.revision)
-		expect(revisions).toEqual(['2b', '2a'])
-	})
-
-	test('Simple multiple nested merges.', () => {
-		const revisions = graph.find((i) => i.revision === '9').graph.merged.map((i) => i.revision)
-		expect(revisions).toEqual(['6c', '6b', '6a', '6a2', '6a1'])
-	})
-
-	test('Commit messages are combined from merged commits.', () => {
-		const rev5 = combinedMessages.find((i) => i.revision === '5')
-		const expectSummary = ['rev 5'].join('\n')
-		const expectFull = ['Full rev 5', 'Full rev 2b', 'Full rev 2a'].join('\n')
-
-		expect(rev5.summary).toEqual(expectSummary)
-		expect(rev5.fullText).toEqual(expectFull)
-	})
+const commit = (revision, parents = '', fields = {}) => ({
+	revision,
+	date: '2026-01-01',
+	summary: `Summary ${revision}`,
+	fullText: `Full ${revision}`,
+	authorName: 'Jane',
+	authorEmail: 'jane@example.com',
+	parents,
+	...fields
 })
 
-describe('Decorate reverts', () => {
-	test('basic revert', () => {
-		const log = {
-			summary: 'Revert "Foo bar commit"',
-			fullText: 'Revert "Foo bar commit"\nThis reverts commit b71e882870a04fa35b77031f06b1edbdb6acb21c.'
-		}
-		expect(source.isRevert(log)).toBe('b71e882870a04fa35b77031f06b1edbdb6acb21c')
+describe('SourceControl', () => {
+	test('loads commit logs from git', async () => {
+		const all = [commit('a1', '', { summary: 'Feature [ENG-1]', fullText: 'Feature [ENG-1]' })]
+		const log = jest.fn((opts, cb) => cb(null, { all }))
+		git.mockReturnValue({ log })
+
+		const source = new SourceControl()
+		const logs = await source.getCommitLogs('/repo', { from: 'a', to: 'b', symmetric: false })
+
+		expect(git).toHaveBeenCalledWith('/repo')
+		expect(log.mock.calls[0][0].from).toBe('a')
+		expect(log.mock.calls[0][0].to).toBe('b')
+		expect(log.mock.calls[0][0].symmetric).toBe(false)
+		expect(logs[0].revision).toBe('a1')
 	})
 
-	test('false revert - i.e. a commit with merely "revert" in the text.', () => {
-		const log = {
-			summary: 'Code I wrote to revert old behavior.',
-			fullText: 'Code I wrote to revert old behavior. From commit b71e882870a04fa35b77031f06b1edbdb6acb21c.'
-		}
-		expect(source.isRevert(log)).toBe(null)
+	test('passes opaque git ranges through as custom arguments', async () => {
+		const log = jest.fn((args, opts, cb) => cb(null, { all: [] }))
+		git.mockReturnValue({ log })
+
+		const source = new SourceControl()
+		await source.getCommitLogs('/repo', 'HEAD~3')
+
+		expect(log.mock.calls[0][0]).toEqual(['HEAD~3'])
+		expect(log.mock.calls[0][1].format.revision).toBe('%H')
 	})
 
-	test('revert of a revert (unrevert)', () => {
-		const log = {
-			summary: 'Revert "Revert "Foo bar commit""',
-			fullText: 'Revert "Revert "Foo bar commit""\nThis reverts commit b71e882870a04fa35b77031f06b1edbdb6acb21c.'
-		}
-		expect(source.isRevert(log)).toBe(null)
+	test('detects git revert commits', () => {
+		const source = new SourceControl()
+		const reverted = source.isRevert({
+			summary: 'Revert "Feature"',
+			fullText: 'Revert "Feature"\n\nThis reverts commit abc123.'
+		})
+
+		expect(reverted).toBe('abc123')
 	})
 
-	test('odd number of reverts (re-revert)', () => {
-		const log = {
-			summary: 'Revert "Revert "Revert "Foo bar commit""',
-			fullText: 'Revert "Revert "Revert "Foo bar commit""\nThis reverts commit b71e882870a04fa35b77031f06b1edbdb6acb21c.'
-		}
-		expect(source.isRevert(log)).toBe('b71e882870a04fa35b77031f06b1edbdb6acb21c')
+	test('does not treat double-revert commits as reverts', () => {
+		const source = new SourceControl()
+		const reverted = source.isRevert({
+			summary: 'Revert "Revert "Feature""',
+			fullText: 'Revert "Revert "Feature""\n\nThis reverts commit abc123.'
+		})
+
+		expect(reverted).toBeNull()
 	})
 
-	test('Commit messages are not combined from reverted commits.', () => {
-		// Mark commit as reverted
-		const rev2b = testGitLogs.find((l) => l.revision == '2b')
-		rev2b.summary = 'Revert "Foo bar commit"'
-		rev2b.fullText = 'Revert "Foo bar commit"\nThis reverts commit b71e882870a04fa35b77031f06b1edbdb6acb21c.'
+	test('does not treat normal commits as reverts', () => {
+		const source = new SourceControl()
 
-		// Generate combined commit messages
-		const graph = source.simpleTopLevelGraph(testGitLogs)
-		const combinedMessages = source.consolodateCommitMessages(graph)
+		expect(source.isRevert(commit('abc123'))).toBeNull()
+	})
 
-		// Rev 2b should not be inlcuded
-		const rev5 = combinedMessages.find((i) => i.revision === '5')
-		const expectSummary = ['rev 5'].join('\n')
-		const expectFull = ['Full rev 5', 'Full rev 2a'].join('\n')
-		expect(rev5.summary).toEqual(expectSummary)
-		expect(rev5.fullText).toEqual(expectFull)
+	test('builds a one-level graph that preserves nested merge commits', () => {
+		const source = new SourceControl()
+		const logs = [
+			commit('6', '5 3'),
+			commit('5', '4'),
+			commit('4', '2'),
+			commit('3', '2 2b'),
+			commit('2b', '2a'),
+			commit('2a', '2'),
+			commit('2', '1'),
+			commit('1')
+		]
+
+		const graph = source.simpleTopLevelGraph(logs)
+
+		expect(graph.map((item) => item.revision)).toEqual(['6', '5', '4', '2', '1'])
+		expect(graph[0].graph.merged.map((item) => item.revision)).toEqual(['3', '2b', '2a'])
+	})
+
+	test('consolidates nested merged commit messages into their top-level merge commit', () => {
+		const source = new SourceControl()
+		const logs = [
+			commit('6', '5 3', { fullText: 'Merge' }),
+			commit('5', '4', { fullText: 'Full rev 5' }),
+			commit('4', '2', { fullText: 'Full rev 4' }),
+			commit('3', '2 2b', { fullText: 'Full rev 3' }),
+			commit('2b', '2a', { fullText: 'Full rev 2b' }),
+			commit('2a', '2', { fullText: 'Full rev 2a' }),
+			commit('2', '1', { fullText: 'Full rev 2' }),
+			commit('1', '', { fullText: 'Full rev 1' })
+		]
+
+		const graph = source.simpleTopLevelGraph(logs)
+		const consolidated = source.consolidateCommitMessages(graph)
+
+		expect(consolidated[0].fullText).toContain('Merge')
+		expect(consolidated[0].fullText).toContain('Full rev 3')
+		expect(consolidated[0].fullText).toContain('Full rev 2b')
+		expect(consolidated[0].fullText).toContain('Full rev 2a')
+		expect(consolidated[1].fullText).toBe('Full rev 5')
+	})
+
+	test('does not consolidate merged revert commit messages', () => {
+		const source = new SourceControl()
+		const logs = [
+			commit('merge', 'main revert', { fullText: 'Merge' }),
+			commit('main', 'base', { fullText: 'Mainline' }),
+			commit('revert', 'base', {
+				summary: 'Revert "Feature [ENG-1]"',
+				fullText: 'Revert "Feature [ENG-1]"\n\nThis reverts commit abc123.'
+			}),
+			commit('base')
+		]
+
+		const graph = source.simpleTopLevelGraph(logs)
+		const consolidated = source.consolidateCommitMessages(graph)
+
+		expect(consolidated[0].fullText).toBe('Merge')
+		expect(consolidated[0].fullText).not.toContain('Feature [ENG-1]')
+	})
+
+	test('keeps backwards-compatible misspelled consolidate alias', () => {
+		const source = new SourceControl()
+		const graph = source.simpleTopLevelGraph([commit('merge', 'main feature'), commit('main'), commit('feature', '', { fullText: 'Feature [ENG-1]' })])
+
+		expect(source.consolodateCommitMessages(graph)[0].fullText).toContain('Feature [ENG-1]')
 	})
 })

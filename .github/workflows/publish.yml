@@ -3,7 +3,7 @@ name: Publish package
 on:
   workflow_dispatch:
   release:
-    types: [ 'created' ]
+    types: ['created']
 
 permissions:
   id-token: write
@@ -12,16 +12,12 @@ permissions:
 jobs:
   publish:
     runs-on: ubuntu-latest
-
     steps:
       - uses: actions/checkout@v6
-
       - uses: actions/setup-node@v6
         with:
           node-version: '24'
           registry-url: https://registry.npmjs.org
           cache: npm
-
       - run: npm ci
-
       - run: npm publish --access public

@@ -1,131 +1,160 @@
 import fetch from 'node-fetch'
-import urlencoded from 'form-urlencoded'
+import { URLSearchParams } from 'url'
 
-const API_ROOT = 'https://slack.com/api/'
+const API_ROOT = 'https://slack.com/api'
 const MSG_SIZE_LIMIT = 4000
 
-// Cache of GET requests
-const cache = {}
+function compactObject(obj = {}) {
+	return Object.entries(obj).reduce((out, [key, value]) => {
+		if (typeof value !== 'undefined' && value !== null && value !== '') {
+			out[key] = value
+		}
 
-// Cache of pending GET requests
-const pending = {}
+		return out
+	}, {})
+}
+
+function encodeForm(body = {}) {
+	return new URLSearchParams(compactObject(body)).toString()
+}
 
 /**
- * Manages the slack integration.
+ * Manages Slack integration.
  */
 export default class Slack {
 	constructor(config) {
 		this.config = config
 		this.slackUsers = false
+		this.cache = {}
+		this.pending = {}
 	}
 
 	/**
-	 * Is the slack integration enabled
+	 * Is Slack integration enabled?
 	 */
 	isEnabled() {
-		return this.config.slack && this.config.slack.apiKey
+		return Boolean(this.config.slack && this.config.slack.apiKey)
 	}
 
 	/**
-	 * Make an API call and return the repsponse
+	 * Make a Slack API call.
 	 *
-	 * @param {String} endpoint - The API endpoint name. (i.e 'users.list')
-	 * @param {String} method - The HTTP method to use (i.e. GET)
-	 * @param {Object} body - The request body for POST or PUT. This will be serialized to application/x-www-form-urlencoded
-	 *
-	 * @return {Promise}
+	 * @param {String} endpoint - Slack API endpoint name, for example chat.postMessage.
+	 * @param {String} method - HTTP method.
+	 * @param {Object} body - Request body or query values.
+	 * @return {Promise<Object>}
 	 */
 	api(endpoint, method = 'GET', body = undefined) {
-		const headers = {}
-		const cachable = method.toUpperCase() == 'GET'
-		headers['Authorization'] = `Bearer ${this.config.slack.apiKey}`
-		const url = `${API_ROOT}/${endpoint}`
-
 		if (!this.isEnabled()) {
 			return Promise.reject('The slack API is not configured.')
 		}
 
-		if (typeof body === 'object') {
-			body = urlencoded(body)
+		const methodName = method.toUpperCase()
+		const cachable = methodName === 'GET'
+		const headers = {
+			Authorization: `Bearer ${this.config.slack.apiKey}`
 		}
-		if (method === 'POST') {
-			headers['Content-Type'] = 'application/x-www-form-urlencoded'
-		} else if (cachable && cache[url]) {
-			return Promise.resolve(cache[url])
-		} else if (method === 'GET' && pending[url]) {
-			return pending[url]
+		let url = `${API_ROOT}/${endpoint}`
+		let requestBody
+
+		if (body && typeof body === 'object') {
+			const encoded = encodeForm(body)
+
+			if (methodName === 'GET' && encoded) {
+				url = `${url}?${encoded}`
+			} else if (encoded) {
+				requestBody = encoded
+				headers['Content-Type'] = 'application/x-www-form-urlencoded'
+			}
 		}
 
-		pending[url] = fetch(url, { method, body, headers })
+		const cacheKey = `${methodName}:${url}`
+
+		if (cachable && this.cache[cacheKey]) {
+			return Promise.resolve(this.cache[cacheKey])
+		}
+
+		if (cachable && this.pending[cacheKey]) {
+			return this.pending[cacheKey]
+		}
+
+		const request = fetch(url, {
+			method: methodName,
+			body: requestBody,
+			headers
+		})
 			.then((res) => res.json())
 			.then((data) => {
-				// Cache result
 				if (cachable && data && data.ok) {
-					cache[url] = data
+					this.cache[cacheKey] = data
 				}
+
 				return data
 			})
 
-		return pending[url]
+		if (!cachable) {
+			return request
+		}
+
+		this.pending[cacheKey] = request.finally(() => {
+			delete this.pending[cacheKey]
+		})
+
+		return this.pending[cacheKey]
 	}
 
 	/**
-	 * Post a message to a slack channel.
-	 * If the message is longer than slack's limit, it will be cut into multiple messages.
+	 * Post a message to a Slack channel.
+	 * If the message is longer than Slack's limit, it is split into multiple messages.
 	 *
-	 * @param {String} text - The message to send to slack
-	 * @param {String} channel - The slack channel ID to send the message to. (i.e. `#engineering`)
-	 *
-	 * @return {Promise} Resolves when message has sent
+	 * @param {String} text - Message to send.
+	 * @param {String} channel - Slack channel ID or name.
+	 * @return {Promise<Object>}
 	 */
 	postMessage(text, channel) {
-		// No message
 		if (!text || !text.length) {
 			return Promise.reject('No text to send to slack.')
 		}
 
-		// No slack integration
 		if (!this.isEnabled()) {
 			return Promise.resolve({})
 		}
 
 		const chunks = this.splitUpMessage(text)
 
-		// Send all message chunks
-		const sendPromise = chunks.reduce((promise, text) => {
-			return promise.then(() => sendChunk(text))
-		}, Promise.resolve())
-
-		// Sends a single message to the channel and returns a promise
-		const self = this
-		function sendChunk(text) {
-			return self
-				.api('chat.postMessage', 'POST', {
-					text,
+		return chunks.reduce((promise, chunk) => {
+			return promise.then(() =>
+				this.api('chat.postMessage', 'POST', {
+					text: chunk,
 					channel,
 					parse: 'full',
-					username: self.config.slack.username,
-					icon_emoji: self.config.slack.icon_emoji,
-					icon_url: self.config.slack.icon_url
-				})
-				.then((response) => {
+					username: this.config.slack.username,
+					icon_emoji: this.config.slack.icon_emoji,
+					icon_url: this.config.slack.icon_url
+				}).then((response) => {
 					if (response && !response.ok) {
 						throw response.error
 					}
+
 					return response
 				})
-		}
-
-		return sendPromise
+			)
+		}, Promise.resolve())
 	}
 
 	/**
-	 * Cut a message into chunks that fit Slack's message length limits.
-	 * The text will be divided by newline characters, where possible.
+	 * Backwards-compatible convenience alias.
+	 */
+	post(text, channel = this.config?.slack?.channel) {
+		return this.postMessage(text, channel)
+	}
+
+	/**
+	 * Cut a message into chunks that fit Slack's message length limit.
+	 * The text is divided on newlines when possible.
 	 *
-	 * @param {String} text - The message text to split up.
-	 *
-	 * @return {Array}
+	 * @param {String} text - Message text.
+	 * @return {Array<String>}
 	 */
 	splitUpMessage(text) {
 		if (text.length <= MSG_SIZE_LIMIT) {
@@ -141,34 +170,26 @@ export default class Slack {
 		lines.forEach((line) => {
 			const tmpBlock = `${block}${line}\n`
 
-			// Within size limit
 			if (tmpBlock.length <= MSG_SIZE_LIMIT) {
 				block = tmpBlock
-			}
-			// Bigger than size limit
-			else {
-				// Add last block and start new one
-				if (block.length) {
-					messages.push(block)
-					block = line
-				}
+			} else if (block.length) {
+				messages.push(block)
+				block = line
+			} else {
+				while (line.length > 0) {
+					let last = line.substr(0, limit).trim()
+					line = line.substr(limit).trim()
 
-				// No existing block, this line must be loner than the limit
-				else {
-					while (line.length > 0) {
-						let last = line.substr(0, limit).trim()
-						line = line.substr(limit).trim()
-
-						// Add continuation characters
-						if (line.length) {
-							last += continuation
-							line = `${continuation}${line}`
-						}
-						messages.push(last)
+					if (line.length) {
+						last += continuation
+						line = `${continuation}${line}`
 					}
+
+					messages.push(last)
 				}
 			}
 		})
+
 		if (block) {
 			messages.push(block)
 		}
