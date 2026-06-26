@@ -31,7 +31,11 @@ module.exports = {
 			host: jiraHost,
 
 			// Email address of the Atlassian account used for API access.
-			email: env('JIRA_API_USER') || env('CHANGELOG_JIRA_API_USER') || env('JIRA_EMAIL') || env('CHANGELOG_JIRA_EMAIL'),
+			email:
+				env('JIRA_API_USER') ||
+				env('CHANGELOG_JIRA_API_USER') ||
+				env('JIRA_EMAIL') ||
+				env('CHANGELOG_JIRA_EMAIL'),
 
 			// Atlassian API token.
 			token: env('JIRA_API_TOKEN') || env('CHANGELOG_JIRA_API_TOKEN'),
@@ -95,7 +99,7 @@ module.exports = {
 	// Source control settings
 	sourceControl: {
 		defaultRange: {
-			from: 'origin/prod',
+			from: 'origin/main',
 			to: 'origin/stage',
 			// symmetric='...', non-symmetric='..'
 			symmetric: false
