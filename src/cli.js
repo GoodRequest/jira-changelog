@@ -10,7 +10,7 @@ import 'source-map-support/register'
 import fs from 'fs'
 import path from 'path'
 import { program } from 'commander'
-import git from 'simple-git'
+import { simpleGit as git } from 'simple-git'
 import { decodeEntity } from 'html-entities'
 
 import Slack from './Slack'

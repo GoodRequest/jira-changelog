@@ -1,7 +1,7 @@
-import git from 'simple-git'
+import { simpleGit as git } from 'simple-git'
 import { getRangeObject, parseRange } from './cli'
 
-jest.mock('simple-git', () => jest.fn())
+jest.mock('simple-git', () => ({ simpleGit: jest.fn() }))
 
 function mockTags(all) {
 	const tags = jest.fn(() => Promise.resolve({ all }))

@@ -1,4 +1,4 @@
-import git from 'simple-git'
+import { simpleGit as git } from 'simple-git'
 
 /**
  * Connect to the source control system and return commit logs for a range.

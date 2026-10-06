@@ -1,7 +1,7 @@
 import SourceControl from './SourceControl'
-import git from 'simple-git'
+import { simpleGit as git } from 'simple-git'
 
-jest.mock('simple-git', () => jest.fn())
+jest.mock('simple-git', () => ({ simpleGit: jest.fn() }))
 
 beforeEach(() => {
 	git.mockReset()
